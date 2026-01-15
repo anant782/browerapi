@@ -1,61 +1,32 @@
-#!/usr/bin/env python3
-import requests
-import sys
-import time
+from flask import Flask, request, jsonify
+from auto_ai_server import KnowledgeBase, SearXNGClient
 
-# CHANGE THIS if one instance goes down
-SEARXNG_INSTANCE = "https://searx.be"
+app = Flask(__name__)
 
-def search(query, limit=5):
-    url = f"{SEARXNG_INSTANCE}/search"
-    params = {
-        "q": query,
-        "format": "json",
-        "language": "en",
-        "categories": "general"
-    }
+kb = KnowledgeBase()
+client = SearXNGClient("https://searx.be")  # change if self-hosted
 
-    headers = {
-        "User-Agent": "Terminal-AI/1.0"
-    }
+@app.route("/query")
+def query_ai():
+    q = request.args.get("q")
+    if not q:
+        return jsonify({"error": "No query"}), 400
 
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        print("[ERROR] API request failed:", e)
-        return []
+    if kb.has_full_information(q):
+        ans, trust = kb.retrieve(q)
+        return jsonify({"answer": ans, "source": "knowledge", "trust": trust})
 
-    results = []
-    for r in data.get("results", [])[:limit]:
-        results.append({
-            "title": r.get("title"),
-            "url": r.get("url"),
-            "content": r.get("content")
-        })
+    # fetch from SearXNG
+    results = client.search(q)
+    if not results:
+        return jsonify({"answer": None, "source": "none"})
 
-    return results
+    best = results[0]
+    content = best['content'] or best['title']
+    kb.store(q, content, trust=0.8)
+    kb.save()
 
+    return jsonify({"answer": content, "source": best['title'], "trust": 0.8})
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python3 searxng_client.py \"your query\"")
-        sys.exit(1)
-
-    query = " ".join(sys.argv[1:])
-    print(f"[SEARCH] {query}\n")
-
-    results = search(query)
-
-    if not results:
-        print("No results found.")
-        sys.exit(0)
-
-    for i, r in enumerate(results, 1):
-        print(f"#{i} {r['title']}")
-        print(r['url'])
-        if r['content']:
-            print(r['content'][:300])
-        print("-" * 60)
-        time.sleep(0.3)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
