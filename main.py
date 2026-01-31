@@ -1,23 +1,23 @@
 import os
 import uuid
 import time
-import asyncio
 import edge_tts
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict
+from urllib.parse import unquote
 
 # ===============================
-# BASIC CONFIG
+# CONFIG
 # ===============================
 
-APP_NAME = "Free Edge TTS API"
-MAX_TEXT_LENGTH = 350        # safe limit
-RATE_LIMIT_SECONDS = 3       # per IP
+APP_NAME = "Private Edge TTS API"
+MAX_TEXT_LENGTH = 350
+RATE_LIMIT_SECONDS = 2
 AUDIO_FOLDER = "audio_files"
 
-DEFAULT_VOICE = "hi-IN-MadhurNeural"
+DEFAULT_VOICE = "hi-IN-SwaraNeural"
 
 ALLOWED_VOICES = [
     "hi-IN-SwaraNeural",
@@ -40,7 +40,7 @@ app.add_middleware(
 )
 
 # ===============================
-# STORAGE + RATE LIMIT
+# STORAGE
 # ===============================
 
 if not os.path.exists(AUDIO_FOLDER):
@@ -49,13 +49,13 @@ if not os.path.exists(AUDIO_FOLDER):
 ip_last_request: Dict[str, float] = {}
 
 # ===============================
-# UTILS
+# HELPERS
 # ===============================
 
 def clean_old_files(max_age=120):
     now = time.time()
-    for file in os.listdir(AUDIO_FOLDER):
-        path = os.path.join(AUDIO_FOLDER, file)
+    for f in os.listdir(AUDIO_FOLDER):
+        path = os.path.join(AUDIO_FOLDER, f)
         if os.path.isfile(path):
             if now - os.path.getmtime(path) > max_age:
                 try:
@@ -63,13 +63,18 @@ def clean_old_files(max_age=120):
                 except:
                     pass
 
-def rate_limited(ip: str):
+def is_rate_limited(ip: str):
     now = time.time()
     last = ip_last_request.get(ip, 0)
     if now - last < RATE_LIMIT_SECONDS:
         return True
     ip_last_request[ip] = now
     return False
+
+def sanitize_rate_pitch(value: str):
+    if not value:
+        return value
+    return value.replace(" ", "")
 
 # ===============================
 # ROUTES
@@ -79,50 +84,68 @@ def rate_limited(ip: str):
 def home():
     return {
         "status": "running",
-        "engine": "Microsoft Edge TTS",
         "voices": ALLOWED_VOICES
     }
-
-@app.get("/voices")
-def voices():
-    return {"voices": ALLOWED_VOICES}
 
 @app.get("/tts")
 async def tts(
     request: Request,
-    text: str = Query(..., min_length=1),
+    text: str = Query(...),
     voice: str = Query(DEFAULT_VOICE),
-    rate: str = "+0%",
-    pitch: str = "+0Hz"
+    rate: str = Query("0%"),
+    pitch: str = Query("0Hz")
 ):
     client_ip = request.client.host
 
-    # Rate limit
-    if rate_limited(client_ip):
+    if is_rate_limited(client_ip):
         return JSONResponse(
             {"error": "Too many requests"},
             status_code=429
         )
 
-    # Text limit
+    # Decode URL encoded text
+    text = unquote(text).strip()
+
+    if not text:
+        return JSONResponse(
+            {"error": "Empty text"},
+            status_code=400
+        )
+
     if len(text) > MAX_TEXT_LENGTH:
         return JSONResponse(
             {"error": "Text too long"},
             status_code=400
         )
 
-    # Voice check
     if voice not in ALLOWED_VOICES:
         return JSONResponse(
             {"error": "Voice not allowed"},
             status_code=400
         )
 
-    # Cleanup
+    # FIX: sanitize rate & pitch
+    rate = sanitize_rate_pitch(rate)
+    pitch = sanitize_rate_pitch(pitch)
+
+    # Validate rate
+    if not rate.endswith("%"):
+        return JSONResponse(
+            {"error": "Invalid rate format. Use +10% or -10%"},
+            status_code=400
+        )
+
+    # Validate pitch
+    if not pitch.endswith("Hz"):
+        return JSONResponse(
+            {"error": "Invalid pitch format. Use +2Hz or -2Hz"},
+            status_code=400
+        )
+
     clean_old_files()
 
-    file_id = str(uuid.uuid4())
-    file_path = f"{AUDIO_FOLDER}/{file_id}.mp3"
+    file_name = f"{uuid.uuid4()}.mp3"
+    file_path = os.path.join(AUDIO_FOLDER, file_name)
 
     try:
         communicate = edge_tts.Communicate(
@@ -143,12 +166,6 @@ async def tts(
         media_type="audio/mpeg",
         filename="speech.mp3"
     )
-rate = rate.replace(" ", "")
-pitch = pitch.replace(" ", "")
-
-# ===============================
-# HEALTH CHECK
-# ===============================
 
 @app.get("/health")
 def health():
