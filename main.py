@@ -143,6 +143,8 @@ async def tts(
         media_type="audio/mpeg",
         filename="speech.mp3"
     )
+rate = rate.replace(" ", "")
+pitch = pitch.replace(" ", "")
 
 # ===============================
 # HEALTH CHECK
