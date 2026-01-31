@@ -16,7 +16,7 @@ MAX_TEXT_LENGTH = 350
 RATE_LIMIT_SECONDS = 2
 AUDIO_FOLDER = "audio_files"
 
-DEFAULT_VOICE = "hi-IN-SwaraNeural"
+DEFAULT_VOICE = "hi-IN-MadhurNeural"
 
 ALLOWED_VOICES = [
     "hi-IN-SwaraNeural",
