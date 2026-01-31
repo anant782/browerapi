@@ -1,88 +1,149 @@
+# filename: edge_tts_api.py
 import os
 import uuid
-import asyncio
-import tempfile
-from fastapi import FastAPI, Query
-from fastapi.responses import StreamingResponse, JSONResponse
+import time
 import edge_tts
+from fastapi import FastAPI, Query, Request
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from typing import Dict
+from urllib.parse import unquote
 
-app = FastAPI()
+# ===============================
+# CONFIG
+# ===============================
+MAX_TEXT_LENGTH = 350
+RATE_LIMIT_SECONDS = 2
+AUDIO_FOLDER = "audio_files"
 
-# -------------------------
-# Helper: sanitize params
-# -------------------------
-def clean_param(value: str):
-    return value.replace(" ", "").strip()
+DEFAULT_VOICE = "hi-IN-MadhurNeural"
+ALLOWED_VOICES = [
+    "hi-IN-SwaraNeural",
+    "hi-IN-MadhurNeural",
+    "en-US-AriaNeural",
+    "en-US-GuyNeural"
+]
 
-# -------------------------
-# TTS Endpoint
-# -------------------------
+# ===============================
+# APP INIT
+# ===============================
+app = FastAPI(title="Private Edge TTS API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ===============================
+# STORAGE
+# ===============================
+os.makedirs(AUDIO_FOLDER, exist_ok=True)
+ip_last_request: Dict[str, float] = {}
+
+# ===============================
+# HELPERS
+# ===============================
+def rate_limited(ip: str):
+    now = time.time()
+    last = ip_last_request.get(ip, 0)
+    if now - last < RATE_LIMIT_SECONDS:
+        return True
+    ip_last_request[ip] = now
+    return False
+
+def clean_old_files(max_age=120):
+    now = time.time()
+    for f in os.listdir(AUDIO_FOLDER):
+        path = os.path.join(AUDIO_FOLDER, f)
+        if os.path.isfile(path) and now - os.path.getmtime(path) > max_age:
+            try:
+                os.remove(path)
+            except:
+                pass
+
+def normalize_rate(value: str):
+    value = value.replace(" ", "")
+    if value.endswith("%") and not value.startswith(("+", "-")):
+        value = "+" + value
+    return value
+
+def normalize_pitch(value: str):
+    value = value.replace(" ", "")
+    if value.endswith("Hz") and not value.startswith(("+", "-")):
+        value = "+" + value
+    return value
+
+# ===============================
+# ROUTES
+# ===============================
+@app.get("/")
+def home():
+    return {"status": "running", "voices": ALLOWED_VOICES}
+
 @app.get("/tts")
 async def tts(
-    text: str = Query(..., min_length=1),
-    voice: str = "hi-IN-MadhurNeural",
-    rate: str = "+6%",
-    pitch: str = "0Hz",
+    request: Request,
+    text: str = Query(...),
+    voice: str = Query(DEFAULT_VOICE),
+    rate: str = Query("0%"),
+    pitch: str = Query("0Hz")
 ):
+    ip = request.client.host
+
+    if rate_limited(ip):
+        return JSONResponse({"error": "Too many requests"}, status_code=429)
+
+    text = unquote(text).strip()
+
+    if not text:
+        return JSONResponse({"error": "Empty text"}, status_code=400)
+
+    if len(text) > MAX_TEXT_LENGTH:
+        return JSONResponse({"error": "Text too long"}, status_code=400)
+
+    if voice not in ALLOWED_VOICES:
+        return JSONResponse({"error": "Voice not allowed"}, status_code=400)
+
+    rate = normalize_rate(rate)
+    pitch = normalize_pitch(pitch)
+
+    if not rate.endswith("%"):
+        return JSONResponse({"error": "Invalid rate format"}, status_code=400)
+
+    if not pitch.endswith("Hz"):
+        return JSONResponse({"error": "Invalid pitch format"}, status_code=400)
+
+    clean_old_files()
+
+    file_path = os.path.join(AUDIO_FOLDER, f"{uuid.uuid4().hex}.mp3")
+
     try:
-        # Clean inputs
-        rate = clean_param(rate)
-        pitch = clean_param(pitch)
-
-        # Validation (important)
-        if not rate.startswith(("+", "-")) or not rate.endswith("%"):
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Invalid rate format. Use +6% or -6%"}
-            )
-
-        if not pitch.endswith("Hz"):
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Invalid pitch format. Use +1Hz or -1Hz"}
-            )
-
-        # Generate unique filename
-        unique_id = uuid.uuid4().hex
-        temp_dir = tempfile.gettempdir()
-        audio_path = os.path.join(temp_dir, f"tts_{unique_id}.mp3")
-
-        # Edge TTS
         communicate = edge_tts.Communicate(
             text=text,
             voice=voice,
             rate=rate,
-            pitch=pitch,
+            pitch=pitch
         )
-
-        await communicate.save(audio_path)
-
-        # Stream audio (NO CACHE)
-        def audio_stream():
-            with open(audio_path, "rb") as f:
-                yield from f
-            # cleanup
-            os.remove(audio_path)
-
-        return StreamingResponse(
-            audio_stream(),
-            media_type="audio/mpeg",
-            headers={
-                "Cache-Control": "no-store, no-cache, must-revalidate",
-                "Pragma": "no-cache",
-                "Expires": "0",
-            },
-        )
-
+        await communicate.save(file_path)
     except Exception as e:
         return JSONResponse(
-            status_code=500,
-            content={"error": "TTS failed", "detail": str(e)},
+            {"error": "TTS failed", "detail": str(e)},
+            status_code=500
         )
 
-# -------------------------
-# Root check
-# -------------------------
-@app.get("/")
-def root():
-    return {"status": "Edge TTS API running"}
+    # StreamingResponse for inline play (AI Studio / Dash friendly)
+    def stream_audio(path):
+        with open(path, "rb") as f:
+            yield from f
+
+    return StreamingResponse(
+        stream_audio(file_path),
+        media_type="audio/mpeg",
+        headers={
+            "Content-Disposition": "inline",
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache"
+        },
+    )
