@@ -22,7 +22,8 @@ ALLOWED_VOICES = [
     "hi-IN-MadhurNeural",
     "en-US-AriaNeural",
     "en-US-GuyNeural",
-    "en-IN-ArjunNeural"
+    "en-IN-ArjunNeural",
+    "en-US-AndrewNeural"
 ]
 
 # ===============================
