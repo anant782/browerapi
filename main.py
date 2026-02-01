@@ -1,4 +1,5 @@
 # filename: edge_tts_api.py
+
 import os
 import uuid
 import time
@@ -55,6 +56,7 @@ def rate_limited(ip: str):
     ip_last_request[ip] = now
     return False
 
+
 def clean_old_files(max_age=120):
     now = time.time()
     for f in os.listdir(AUDIO_FOLDER):
@@ -65,11 +67,13 @@ def clean_old_files(max_age=120):
             except:
                 pass
 
+
 def normalize_rate(value: str):
     value = value.replace(" ", "")
     if value.endswith("%") and not value.startswith(("+", "-")):
         value = "+" + value
     return value
+
 
 def normalize_pitch(value: str):
     value = value.replace(" ", "")
@@ -77,12 +81,33 @@ def normalize_pitch(value: str):
         value = "+" + value
     return value
 
+
+def sanitize_text(text: str) -> str:
+    """
+    Fixes Edge TTS last-word mute issue
+    """
+    text = unquote(text).strip()
+
+    # remove line breaks (important for Hindi)
+    text = text.replace("\n", " ")
+
+    # force sentence ending
+    if not text.endswith((".", "।", "!", "?")):
+        text += "।"
+
+    # small silent pause trigger
+    text += " "
+
+    return text
+
+
 # ===============================
 # ROUTES
 # ===============================
 @app.get("/")
 def home():
     return {"status": "running", "voices": ALLOWED_VOICES}
+
 
 @app.get("/tts")
 async def tts(
@@ -97,9 +122,7 @@ async def tts(
     if rate_limited(ip):
         return JSONResponse({"error": "Too many requests"}, status_code=429)
 
-    text = unquote(text).strip()
-
-    if not text:
+    if not text.strip():
         return JSONResponse({"error": "Empty text"}, status_code=400)
 
     if len(text) > MAX_TEXT_LENGTH:
@@ -119,6 +142,9 @@ async def tts(
 
     clean_old_files()
 
+    # 🔥 text fix applied here
+    text = sanitize_text(text)
+
     file_path = os.path.join(AUDIO_FOLDER, f"{uuid.uuid4().hex}.mp3")
 
     try:
@@ -129,13 +155,13 @@ async def tts(
             pitch=pitch
         )
         await communicate.save(file_path)
+
     except Exception as e:
         return JSONResponse(
             {"error": "TTS failed", "detail": str(e)},
             status_code=500
         )
 
-    # StreamingResponse for inline play (AI Studio / Dash friendly)
     def stream_audio(path):
         with open(path, "rb") as f:
             yield from f
